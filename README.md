@@ -374,8 +374,8 @@ The project compares **LBPH, Eigenfaces, and Fisherfaces** using a common prepro
 
 ## Authors
 
-**Shirsam Bhattacharjee**
-**Roni Ghosh**
+- **Shirsam Bhattacharjee**
+- **Roni Ghosh**
 
 ### Computer Vision Assignment
 
