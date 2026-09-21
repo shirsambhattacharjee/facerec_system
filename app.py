@@ -216,8 +216,14 @@ if section == "1. Face Recognition Demo":
 
 
 elif section == "1B. Webcam / Real-Time Recognition":
+
     st.header("1B. Webcam / Real-Time Recognition")
-    st.write("Use your browser webcam for real-time face recognition. The existing Upload Image feature is unchanged.")
+
+    st.write(
+        "Use your browser webcam for real-time face recognition. "
+        "The webcam uses the same trained models, label mapping, "
+        "preprocessing and threshold logic as the uploaded-image system."
+    )
 
     if not WEBRTC_AVAILABLE:
         st.error("Browser webcam support is not available.")
@@ -225,79 +231,353 @@ elif section == "1B. Webcam / Real-Time Recognition":
         st.stop()
 
     webcam_method_label = st.selectbox(
-        "Select Recognition Algorithm:", list(utils.LABEL_TO_KEY), key="webcam_method_label"
+        "Select Recognition Algorithm:",
+        list(utils.LABEL_TO_KEY),
+        index=0,
+        key="webcam_method_label",
     )
+
     webcam_method = utils.LABEL_TO_KEY[webcam_method_label]
+
     webcam_precropped = st.checkbox(
         "Accept tightly-cropped faces when Haar finds no face",
-        value=True, key="webcam_precropped"
+        value=False,
+        key="webcam_precropped",
     )
+
     webcam_threshold = utils.get_threshold(webcam_method)
-    st.info(f"Unknown threshold for {webcam_method_label}: {webcam_threshold:.2f} ({utils.threshold_source(webcam_method)})")
-    st.caption("Click START and allow browser camera permission. Click STOP to turn the camera off.")
+
+    st.info(
+        f"Unknown threshold for {webcam_method_label}: "
+        f"{webcam_threshold:.2f} "
+        f"({utils.threshold_source(webcam_method)})"
+    )
+
+    st.caption(
+        "Click START, allow camera permission, keep your face clearly visible, "
+        "and click STOP when finished."
+    )
+
+    try:
+        webcam_id_to_name = get_id_to_name()
+        webcam_recognizer, webcam_model_path, _ = get_model(webcam_method)
+
+    except Exception as exc:
+        st.error("Could not load the selected recognition model.")
+        st.exception(exc)
+        st.stop()
 
     class FaceRecognitionVideoProcessor(VideoProcessorBase):
+
         def __init__(self):
+
             self.method = webcam_method
+            self.threshold = float(webcam_threshold)
             self.precropped = webcam_precropped
-            self.error = None
-            self.id_to_name = {}
-            self.recognizer = None
-            try:
-                self.id_to_name = get_id_to_name()
-                self.recognizer, self.model_path, _ = get_model(self.method)
-            except Exception as exc:
-                self.error = str(exc)
+
+            self.recognizer = webcam_recognizer
+            self.id_to_name = webcam_id_to_name
+
+            self.frame_count = 0
+
+            self.last_name = "Unknown"
+            self.last_known = False
+            self.last_distance = None
+
+            self.prediction_history = []
+
+            self.history_size = 7
+
+        def _stable_prediction(self, result):
+
+            if result is None:
+                self.prediction_history.append(
+                    ("Unknown", False, None)
+                )
+            else:
+                name = result.get("name", "Unknown")
+                known = bool(result.get("known", False))
+                distance = float(result.get("distance", 0.0))
+
+                if known:
+                    self.prediction_history.append(
+                        (name, True, distance)
+                    )
+                else:
+                    self.prediction_history.append(
+                        ("Unknown", False, distance)
+                    )
+
+            if len(self.prediction_history) > self.history_size:
+                self.prediction_history.pop(0)
+
+            if not self.prediction_history:
+                return "Unknown", False, None
+
+            known_predictions = [
+                p for p in self.prediction_history
+                if p[1] is True
+            ]
+
+            if known_predictions:
+
+                name_counts = {}
+
+                for name, known, distance in known_predictions:
+                    name_counts[name] = name_counts.get(name, 0) + 1
+
+                best_name = max(
+                    name_counts,
+                    key=name_counts.get
+                )
+
+                best_count = name_counts[best_name]
+
+                if best_count >= 2:
+
+                    distances = [
+                        p[2]
+                        for p in known_predictions
+                        if p[0] == best_name and p[2] is not None
+                    ]
+
+                    avg_distance = (
+                        sum(distances) / len(distances)
+                        if distances
+                        else None
+                    )
+
+                    return best_name, True, avg_distance
+
+            unknown_distances = [
+                p[2]
+                for p in self.prediction_history
+                if p[2] is not None
+            ]
+
+            avg_distance = (
+                sum(unknown_distances) / len(unknown_distances)
+                if unknown_distances
+                else None
+            )
+
+            return "Unknown", False, avg_distance
 
         def recv(self, frame):
-            image = frame.to_ndarray(format="bgr24")
-            if self.error:
-                cv2.putText(image, "Model loading error", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-                return av.VideoFrame.from_ndarray(image, format="bgr24")
-            try:
-                gray = utils.to_gray(image)
-                threshold = utils.get_threshold(self.method)
-                found = utils.recognize_image(
-                    gray, self.recognizer, self.id_to_name, threshold,
-                    allow_precropped=self.precropped
-                )
-                if not found:
-                    cv2.putText(image, "No face detected", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2)
-                else:
-                    for result in found:
-                        x, y, w, h = result["box"]
-                        known = bool(result["known"])
-                        name = result["name"] if known else "Unknown"
-                        distance = float(result["distance"])
-                        color = (0, 255, 0) if known else (0, 0, 255)
-                        label = f"{name} ({distance:.1f})"
-                        cv2.rectangle(image, (x, y), (x + w, y + h), color, 2)
-                        cv2.putText(image, label, (x, max(y - 10, 25)), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-                cv2.putText(image, f"Method: {utils.METHOD_LABELS[self.method]}", (20, image.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            except Exception:
-                cv2.putText(image, "Recognition error", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2)
-            return av.VideoFrame.from_ndarray(image, format="bgr24")
 
-    rtc_configuration = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+            image = frame.to_ndarray(format="bgr24")
+
+            self.frame_count += 1
+
+            try:
+
+                image = cv2.flip(image, 1)
+
+                original = image.copy()
+
+                image_for_recognition = utils.limit_size(image)
+
+                gray = utils.to_gray(image_for_recognition)
+
+                found = utils.recognize_image(
+                    gray,
+                    self.recognizer,
+                    self.id_to_name,
+                    self.threshold,
+                    allow_precropped=self.precropped,
+                )
+
+                if not found:
+
+                    self._stable_prediction(None)
+
+                    cv2.putText(
+                        image,
+                        "No face detected",
+                        (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.8,
+                        (255, 255, 255),
+                        2,
+                        cv2.LINE_AA,
+                    )
+
+                else:
+
+                    for result in found:
+
+                        x, y, w, h = result["box"]
+
+                        known = bool(result["known"])
+
+                        raw_name = result.get(
+                            "name",
+                            "Unknown"
+                        )
+
+                        distance = float(
+                            result.get(
+                                "distance",
+                                0.0
+                            )
+                        )
+
+                        if known:
+                            stable_name, stable_known, stable_distance = (
+                                self._stable_prediction(result)
+                            )
+                        else:
+                            stable_name, stable_known, stable_distance = (
+                                self._stable_prediction(result)
+                            )
+
+                        if stable_known:
+                            display_name = stable_name
+                            color = (0, 255, 0)
+
+                            display_distance = (
+                                stable_distance
+                                if stable_distance is not None
+                                else distance
+                            )
+
+                            label = (
+                                f"{display_name} "
+                                f"({display_distance:.1f})"
+                            )
+
+                        else:
+                            display_name = "Unknown"
+                            color = (0, 0, 255)
+
+                            label = (
+                                f"Unknown ({distance:.1f})"
+                            )
+
+                        cv2.rectangle(
+                            image,
+                            (x, y),
+                            (x + w, y + h),
+                            color,
+                            2,
+                        )
+
+                        cv2.putText(
+                            image,
+                            label,
+                            (
+                                x,
+                                max(y - 10, 25)
+                            ),
+                            cv2.FONT_HERSHEY_SIMPLEX,
+                            0.7,
+                            color,
+                            2,
+                            cv2.LINE_AA,
+                        )
+
+                method_text = (
+                    f"Method: {utils.METHOD_LABELS[self.method]}"
+                )
+
+                threshold_text = (
+                    f"Threshold: {self.threshold:.1f}"
+                )
+
+                cv2.putText(
+                    image,
+                    method_text,
+                    (20, image.shape[0] - 45),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+                cv2.putText(
+                    image,
+                    threshold_text,
+                    (20, image.shape[0] - 20),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (255, 255, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+            except Exception as exc:
+
+                cv2.putText(
+                    image,
+                    "Recognition error",
+                    (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.8,
+                    (0, 0, 255),
+                    2,
+                    cv2.LINE_AA,
+                )
+
+                if self.frame_count == 1:
+                    print(
+                        "Webcam recognition error:",
+                        repr(exc)
+                    )
+
+            return av.VideoFrame.from_ndarray(
+                image,
+                format="bgr24"
+            )
+
+    rtc_configuration = RTCConfiguration(
+        {
+            "iceServers": [
+                {
+                    "urls": [
+                        "stun:stun.l.google.com:19302"
+                    ]
+                }
+            ]
+        }
+    )
+
     webrtc_streamer(
-        key="face-recognition-webcam",
+        key="face-recognition-webcam-v2",
         mode=WebRtcMode.SENDRECV,
         rtc_configuration=rtc_configuration,
         video_processor_factory=FaceRecognitionVideoProcessor,
-        media_stream_constraints={"video": True, "audio": False},
+        media_stream_constraints={
+            "video": {
+                "width": {"ideal": 640},
+                "height": {"ideal": 480},
+                "frameRate": {"ideal": 15},
+            },
+            "audio": False,
+        },
         async_processing=True,
     )
 
     st.markdown("---")
-    st.subheader("How to use Webcam Recognition")
-    st.markdown("""
-    1. Click **START** and allow camera permission.
-    2. Keep your face clearly visible.
-    3. **Known face:** green box + trained name.
-    4. **Unknown face:** red box + `Unknown`.
-    5. Click **STOP** to end the camera stream.
 
-    """)
+    st.subheader("How to use Webcam Recognition")
+
+    st.markdown(
+        """
+        1. Click **START** and allow browser camera permission.
+        2. Keep your face clearly visible and reasonably close to the camera.
+        3. Make sure the room has sufficient lighting.
+        4. **Known face** → green box + trained person's name.
+        5. **Unknown face** → red box + `Unknown`.
+        6. The system uses recent-frame voting to reduce random recognition changes.
+        7. Click **STOP** to end the webcam stream.
+
+        **Privacy:** The webcam is processed through the Streamlit application;
+        the application does not intentionally save webcam frames or recordings.
+        """
+    )
+
+
 
 elif section == "2. Method Comparison":
     st.header("2. Method Performance Comparison")
