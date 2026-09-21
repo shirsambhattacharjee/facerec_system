@@ -1,0 +1,13 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+.streamlit/
+desktop.ini
+
+# Private face dataset
+dataset/
+
+# Local test/debug outputs
+results/check_photo_*.png

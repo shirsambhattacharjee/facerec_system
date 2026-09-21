@@ -1,0 +1,18 @@
+{
+  "method": "eigen",
+  "pipeline_version": 2,
+  "face_size": [
+    200,
+    200
+  ],
+  "label_map": {
+    "Person3": 0,
+    "Person4": 1,
+    "Roni": 2,
+    "Shirsam": 3
+  },
+  "original_images": 99,
+  "training_samples": 576,
+  "augment_copies": 2,
+  "trained_at": "2026-09-21T09:22:28"
+}

@@ -1,0 +1,4 @@
+Method,Threshold,Accuracy,Precision,Recall,Closest_Class_Accuracy,Unknown_Rate,Avg_Time_ms,Test_Images
+LBPH,60.625,0.8966,0.8,0.7,0.9655,0.1034,19.656,29
+Eigenfaces,8835.706,0.7241,0.8,0.6167,0.8966,0.2759,9.218,29
+Fisherfaces,33.342,0.2759,0.8,0.4,0.8966,0.7241,2.746,29
