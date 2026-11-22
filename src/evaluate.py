@@ -88,6 +88,11 @@ def evaluate_method(method, test, label_map):
 def main(methods=utils.METHODS):
     label_map = utils.load_label_map()
     test, _ = utils.load_split(utils.DATASET_TEST_DIR, label_map, allow_unknown=True, verbose=True)
+    if len(test) > 2000:
+        rng = np.random.default_rng(42)
+        selected = rng.choice(len(test), size=2000, replace=False)
+        test = [test[i] for i in sorted(selected)]
+        print(f"\nEvaluation subset: {len(test)} images (random seed 42)")
     if not test:
         raise RuntimeError("No usable images in dataset/test.")
     rows = [evaluate_method(m, test, label_map) for m in methods]

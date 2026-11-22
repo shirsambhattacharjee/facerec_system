@@ -1,12 +1,13 @@
 import os
 import json
 from datetime import datetime
-
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 import cv2
 import numpy as np
+from sklearn.decomposition import IncrementalPCA
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-DATASET_TRAIN_DIR = os.path.join(PROJECT_ROOT, "dataset", "train")
+DATASET_TRAIN_DIR = os.path.join(PROJECT_ROOT, "dataset_10k", "train")
 DATASET_TEST_DIR = os.path.join(PROJECT_ROOT, "dataset", "test")
 MODELS_DIR = os.path.join(PROJECT_ROOT, "models")
 RESULTS_DIR = os.path.join(PROJECT_ROOT, "results")
@@ -26,12 +27,12 @@ METHOD_LABELS = {"lbph": "LBPH", "eigen": "Eigenfaces", "fisher": "Fisherfaces"}
 LABEL_TO_KEY = {v: k for k, v in METHOD_LABELS.items()}
 MODEL_FILES = {
     "lbph": "lbph_model.yml",
-    "eigen": "eigenfaces_model.yml",
-    "fisher": "fisherfaces_model.yml",
+    "eigen": "eigenfaces_model.npz",
+    "fisher": "fisherfaces_model.npz",
 }
 RESULT_STEMS = {"lbph": "lbph", "eigen": "eigenfaces", "fisher": "fisherfaces"}
 
-LBPH_PARAMS = dict(radius=1, neighbors=8, grid_x=8, grid_y=8)
+LBPH_PARAMS = dict(radius=1, neighbors=8, grid_x=4, grid_y=4)
 EIGEN_COMPONENTS = 60           
 DEFAULT_AUGMENT_COPIES = 2      
 AUGMENT_SEED = 42
@@ -373,15 +374,254 @@ def build_training_arrays(records, copies=DEFAULT_AUGMENT_COPIES, seed=AUGMENT_S
     return faces, np.array(labels, dtype=np.int32)
 
 
+
+class EigenPCARecognizer:
+    """Memory-efficient Eigenfaces recognizer using Incremental PCA."""
+
+    def __init__(self, n_components=EIGEN_COMPONENTS):
+        self.n_components = n_components
+        self.pca = None
+        self.features = None
+        self.labels = None
+
+    def train(self, faces, labels):
+        n = len(faces)
+        if n < 2:
+            raise ValueError("Eigenfaces needs at least 2 training images.")
+
+        self.n_components = min(self.n_components, n - 1)
+        self.pca = IncrementalPCA(
+            n_components=self.n_components,
+            batch_size=256
+        )
+
+        batch_size = max(256, self.n_components)
+        starts = list(range(0, n, batch_size))
+
+        # Ensure the final batch has enough samples for IncrementalPCA.
+        if len(starts) > 1 and n - starts[-1] < self.n_components:
+            starts.pop()
+
+        print(f"Eigenfaces PCA: {n} images, {self.n_components} components")
+        for i, start in enumerate(starts):
+            end = starts[i + 1] if i + 1 < len(starts) else n
+            batch = np.stack([
+                np.asarray(faces[j], dtype=np.float32).reshape(-1)
+                for j in range(start, end)
+            ])
+            self.pca.partial_fit(batch)
+            print(f"PCA progress: {end}/{n} images", flush=True)
+
+        print("PCA completed. Projecting training images...", flush=True)
+
+        projected = []
+        for start in range(0, n, 256):
+            batch = np.stack([
+                np.asarray(faces[j], dtype=np.float32).reshape(-1)
+                for j in range(start, min(start + 256, n))
+            ])
+            projected.append(self.pca.transform(batch).astype(np.float32))
+            done = min(start + 256, n)
+            if done % 1024 < 256 or done == n:
+                print(f"Projection progress: {done}/{n}", flush=True)
+
+        self.features = np.concatenate(projected, axis=0)
+        self.labels = np.asarray(labels, dtype=np.int32)
+
+    def predict(self, face):
+        if self.pca is None or self.features is None:
+            raise RuntimeError("Eigenfaces model is not trained or loaded.")
+
+        x = np.asarray(face, dtype=np.float32).reshape(1, -1)
+        projected = self.pca.transform(x).astype(np.float32)[0]
+        distances = np.linalg.norm(self.features - projected, axis=1)
+        index = int(np.argmin(distances))
+        return int(self.labels[index]), float(distances[index])
+
+    def write(self, path):
+        if self.pca is None:
+            raise RuntimeError("Cannot save an untrained Eigenfaces model.")
+
+        np.savez_compressed(
+            path,
+            mean=self.pca.mean_,
+            components=self.pca.components_,
+            features=self.features,
+            labels=self.labels,
+            n_components=np.array([self.n_components], dtype=np.int32)
+        )
+
+    def read(self, path):
+        with np.load(path, allow_pickle=False) as data:
+            self.n_components = int(data["n_components"][0])
+            self.pca = IncrementalPCA(n_components=self.n_components)
+            self.pca.mean_ = data["mean"].copy()
+            self.pca.components_ = data["components"].copy()
+            self.pca.n_components_ = self.n_components
+            self.pca.n_features_in_ = self.pca.mean_.shape[0]
+            self.pca.n_samples_seen_ = 1
+            self.features = data["features"].copy()
+            self.labels = data["labels"].copy()
+
+
+
+class FisherPCARecognizer:
+    """Memory-efficient PCA-LDA (approximate Fisherfaces) recognizer."""
+
+    def __init__(self):
+        self.pca = None
+        self.lda_center = None
+        self.lda_scalings = None
+        self.features = None
+        self.labels = None
+
+    def train(self, faces, labels):
+        eigen_path = model_path("eigen")
+
+        if not os.path.exists(eigen_path):
+            raise FileNotFoundError(
+                "Train the Eigenfaces model first: " + eigen_path
+            )
+
+        # Reuse the already trained Eigenfaces PCA.
+        eigen = EigenPCARecognizer()
+        eigen.read(eigen_path)
+        self.pca = eigen.pca
+
+        labels = np.asarray(labels, dtype=np.int32)
+
+        if len(faces) != len(labels):
+            raise ValueError("Faces and labels count mismatch.")
+
+        if len(np.unique(labels)) < 2:
+            raise ValueError("Fisherfaces needs at least 2 classes.")
+
+        print(
+            f"PCA-LDA: projecting {len(faces)} images "
+            "using existing Eigenfaces PCA...",
+            flush=True
+        )
+
+        projected_batches = []
+
+        for start in range(0, len(faces), 256):
+            batch = np.stack([
+                np.asarray(faces[j], dtype=np.float32).reshape(-1)
+                for j in range(start, min(start + 256, len(faces)))
+            ])
+
+            projected_batches.append(
+                self.pca.transform(batch).astype(np.float32)
+            )
+
+            done = min(start + 256, len(faces))
+            print(f"Projection: {done}/{len(faces)}", flush=True)
+
+        X = np.concatenate(projected_batches, axis=0)
+
+        print("Training LDA with automatic shrinkage...", flush=True)
+
+        lda = LinearDiscriminantAnalysis(
+            solver="eigen",
+            shrinkage="auto"
+        )
+        lda.fit(X, labels)
+
+        n_components = min(
+            lda.scalings_.shape[1],
+            len(lda.classes_) - 1
+        )
+
+        self.lda_center = np.asarray(
+         X.mean(axis=0), dtype=np.float32
+        )
+
+        self.lda_scalings = np.asarray(
+            lda.scalings_[:, :n_components],
+            dtype=np.float32
+        )
+
+        self.features = (
+            (X - self.lda_center) @ self.lda_scalings
+        ).astype(np.float32)
+
+        self.labels = labels
+
+        print(
+            f"LDA completed: {n_components} components, "
+            f"{len(self.labels)} training samples.",
+            flush=True
+        )
+
+    def predict(self, face):
+        if self.pca is None or self.features is None:
+            raise RuntimeError("PCA-LDA model is not trained or loaded.")
+
+        x = np.asarray(face, dtype=np.float32).reshape(1, -1)
+        pca_feature = self.pca.transform(x).astype(np.float32)
+
+        lda_feature = (
+            (pca_feature - self.lda_center) @ self.lda_scalings
+        )[0]
+
+        distances = np.linalg.norm(
+            self.features - lda_feature, axis=1
+        )
+
+        index = int(np.argmin(distances))
+
+        return int(self.labels[index]), float(distances[index])
+
+    def write(self, path):
+        if self.features is None:
+            raise RuntimeError("Cannot save an untrained PCA-LDA model.")
+
+        np.savez_compressed(
+            path,
+            pca_mean=self.pca.mean_,
+            pca_components=self.pca.components_,
+            lda_center=self.lda_center,
+            lda_scalings=self.lda_scalings,
+            features=self.features,
+            labels=self.labels
+        )
+
+    def read(self, path):
+        with np.load(path, allow_pickle=False) as data:
+            mean = data["pca_mean"].copy()
+            components = data["pca_components"].copy()
+
+            self.pca = IncrementalPCA(
+                n_components=components.shape[0]
+            )
+            self.pca.mean_ = mean
+            self.pca.components_ = components
+            self.pca.n_components_ = components.shape[0]
+            self.pca.n_features_in_ = mean.shape[0]
+            self.pca.n_samples_seen_ = 1
+
+            self.lda_center = data["lda_center"].copy()
+            self.lda_scalings = data["lda_scalings"].copy()
+            self.features = data["features"].copy()
+            self.labels = data["labels"].copy()
+
+
+
 def create_recognizer(method, n_samples=None):
+    if method == "eigen":
+        comps = EIGEN_COMPONENTS if n_samples is None else max(
+            1, min(EIGEN_COMPONENTS, n_samples - 1)
+        )
+        return EigenPCARecognizer(n_components=comps)
+
+    if method == "fisher":
+        return FisherPCARecognizer()
+
     require_face_module()
+
     if method == "lbph":
         return cv2.face.LBPHFaceRecognizer_create(**LBPH_PARAMS)
-    if method == "eigen":
-        comps = EIGEN_COMPONENTS if n_samples is None else max(1, min(EIGEN_COMPONENTS, n_samples - 1))
-        return cv2.face.EigenFaceRecognizer_create(num_components=comps)
-    if method == "fisher":
-        return cv2.face.FisherFaceRecognizer_create()
+
     raise ValueError(f"Unknown method: {method}")
 
 

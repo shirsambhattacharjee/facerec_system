@@ -11,3 +11,29 @@ dataset/
 
 # Local test/debug outputs
 results/check_photo_*.png
+
+# Backup files and folders
+models/backup_before_shirsam_update/
+dataset_10k/Shirsam_backup_before_update/
+**/*backup*/
+**/*.bak
+**/*.old
+**/*.orig
+
+# Python temporary files
+__pycache__/
+*.pyc
+venv/
+.env
+
+# Dataset and generated models
+dataset/
+dataset_10k/
+models/*.yml
+models/*.npz
+
+# Model backups and temporary files
+models/backup_before_shirsam_update/
+src/*backup*.py
+src/utils_before_fisher_patch.py
+models/*backup*
