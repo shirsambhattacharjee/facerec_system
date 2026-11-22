@@ -1,10 +1,12 @@
 import os
 import json
 from datetime import datetime
-from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 import cv2
 import numpy as np
 from sklearn.decomposition import IncrementalPCA
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+
+
 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 DATASET_TRAIN_DIR = os.path.join(PROJECT_ROOT, "dataset_10k", "train")
@@ -16,12 +18,12 @@ THRESHOLDS_PATH = os.path.join(MODELS_DIR, "thresholds.json")
 HAAR_CASCADE_PATH = os.path.join(PROJECT_ROOT, "data", "haarcascade_frontalface_default.xml")
 VALID_EXTENSIONS = (".jpg", ".jpeg", ".png")
 
-
 FACE_SIZE = (200, 200)
-MAX_IMAGE_DIM = 1280            
-PRECROPPED_MAX_SIDE = 400       
+MAX_IMAGE_DIM = 1280
+PRECROPPED_MAX_SIDE = 400
 DETECT_PARAMS = dict(scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
-PIPELINE_VERSION = 2            
+PIPELINE_VERSION = 2
+
 METHODS = ("lbph", "eigen", "fisher")
 METHOD_LABELS = {"lbph": "LBPH", "eigen": "Eigenfaces", "fisher": "Fisherfaces"}
 LABEL_TO_KEY = {v: k for k, v in METHOD_LABELS.items()}
@@ -32,16 +34,20 @@ MODEL_FILES = {
 }
 RESULT_STEMS = {"lbph": "lbph", "eigen": "eigenfaces", "fisher": "fisherfaces"}
 
-LBPH_PARAMS = dict(radius=1, neighbors=8, grid_x=4, grid_y=4)
-EIGEN_COMPONENTS = 60           
-DEFAULT_AUGMENT_COPIES = 2      
+# 8x8 grid captures 64 local facial regions for much stronger discrimination
+LBPH_PARAMS = dict(radius=1, neighbors=8, grid_x=8, grid_y=8)
+EIGEN_COMPONENTS = 60
+DEFAULT_AUGMENT_COPIES = 2
 AUGMENT_SEED = 42
-DEFAULT_THRESHOLDS = {"lbph": 70.0, "eigen": 4500.0, "fisher": 400.0}
-RECOGNITION_THRESHOLDS = DEFAULT_THRESHOLDS  
-THRESHOLDS = DEFAULT_THRESHOLDS               
-RECOGNITION_THRESHOLDS = DEFAULT_THRESHOLDS  
+
+DEFAULT_THRESHOLDS = {"lbph": 85.0, "eigen": 4000.0, "fisher": 350.0}
+THRESHOLDS = DEFAULT_THRESHOLDS
+RECOGNITION_THRESHOLDS = DEFAULT_THRESHOLDS
 
 
+# ============================================================
+# FILE & JSON UTILITIES
+# ============================================================
 def ensure_dirs(*dirs):
     for d in dirs:
         if d:
@@ -70,6 +76,9 @@ def require_face_module():
         )
 
 
+# ============================================================
+# IMAGE I/O & PREPROCESSING
+# ============================================================
 def decode_image(data):
     """bytes / uint8 array -> BGR image (EXIF orientation applied by OpenCV)."""
     arr = np.frombuffer(data, np.uint8) if isinstance(data, (bytes, bytearray)) else data
@@ -115,12 +124,7 @@ def read_gray(path):
 
 
 def open_camera(index=0, width=640, height=480, warmup=10):
-    """
-    Open a webcam reliably. Tries DirectShow, then Media Foundation, then the default
-    backend (Windows), requests a fixed resolution, and discards `warmup` frames so
-    auto-exposure / auto-white-balance can settle before the first prediction.
-    Always returns a VideoCapture; check .isOpened().
-    """
+    """Open a webcam reliably across OS backends with exposure warmup."""
     backends = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY] if os.name == "nt" else [cv2.CAP_ANY]
     for backend in backends:
         cap = cv2.VideoCapture(index, backend)
@@ -130,12 +134,16 @@ def open_camera(index=0, width=640, height=480, warmup=10):
                 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
             ok = False
             for _ in range(max(1, warmup)):
-                ok, _frame = cap.read()
+                ok, _ = cap.read()
             if ok:
                 return cap
         cap.release()
-    return cv2.VideoCapture()        
+    return cv2.VideoCapture()
 
+
+# ============================================================
+# FACE DETECTION & NORMALIZATION
+# ============================================================
 _DETECTOR = None
 
 
@@ -171,18 +179,14 @@ def _looks_precropped(gray):
 
 
 def locate_faces(gray, detector=None, allow_precropped=False):
-    """
-    Returns [((x, y, w, h), mode)], largest first. mode: "detected" | "whole".
-    allow_precropped=True is used for dataset images (train/test) and optionally
-    Streamlit: a small, squarish image is accepted as a face crop when Haar finds
-    nothing or only a small sub-region of it. The webcam always uses False.
-    """
+    """Returns [((x, y, w, h), mode)], largest first. mode: 'detected' | 'whole'."""
     boxes = detect_faces(gray, detector)
     if allow_precropped and _looks_precropped(gray):
         h, w = gray.shape[:2]
         if not boxes or boxes[0][2] * boxes[0][3] < 0.6 * w * h:
             return [((0, 0, w, h), "whole")]
     return [(b, "detected") for b in boxes]
+
 
 def crop_face(gray, box):
     x, y, w, h = box
@@ -194,7 +198,7 @@ def crop_face(gray, box):
 
 
 def normalize_face(crop):
-    """raw gray face crop -> 200x200 equalized uint8 (what every model sees)."""
+    """Raw gray face crop -> 200x200 histogram-equalized uint8."""
     if crop is None or crop.size == 0:
         return None
     if crop.ndim == 3:
@@ -205,19 +209,17 @@ def normalize_face(crop):
 
 
 def preprocess_face(gray, box):
-    """gray full image + Haar box -> model input. Used by webcam, Streamlit, eval."""
+    """Gray full image + Haar box -> normalized 200x200 face."""
     return normalize_face(crop_face(gray, box))
 
 
 def preprocess_image(img):
     """Backward-compatible: an image that is ALREADY a face crop -> model input."""
-    if img is None:
-        return None
-    return normalize_face(to_gray(img))
+    return None if img is None else normalize_face(to_gray(img))
 
 
 def preprocess_image_file(path, detector=None, allow_precropped=True):
-    """image FILE -> model input (largest face), or None. Same pipeline as training."""
+    """Image file -> model input (largest face), or None."""
     gray = read_gray(path)
     if gray is None:
         return None
@@ -225,6 +227,9 @@ def preprocess_image_file(path, detector=None, allow_precropped=True):
     return preprocess_face(gray, regions[0][0]) if regions else None
 
 
+# ============================================================
+# DATASET & LABEL MAP MANAGEMENT
+# ============================================================
 def list_image_files(folder):
     return sorted(
         os.path.join(folder, f)
@@ -246,7 +251,7 @@ def list_people(dataset_dir, require_images=True):
 
 
 def build_label_map():
-    """Rebuild models/label_map.json from the folders in dataset/train."""
+    """Rebuild models/label_map.json from the folders in DATASET_TRAIN_DIR."""
     people = list_people(DATASET_TRAIN_DIR)
     if not people:
         raise RuntimeError(f"No person folders with .jpg/.jpeg/.png images in {DATASET_TRAIN_DIR}")
@@ -256,7 +261,7 @@ def build_label_map():
 
 
 def load_label_map():
-    """name -> int id, read from models/label_map.json (never hard-coded)."""
+    """name -> int id, read from models/label_map.json."""
     data = _read_json(LABEL_MAP_PATH)
     if data is None:
         raise RuntimeError("models/label_map.json not found. Train a model first.")
@@ -264,17 +269,12 @@ def load_label_map():
 
 
 def id_to_name_map(label_map):
-    """name -> id   into   id -> name"""
+    """name -> id into id -> name."""
     return {int(v): k for k, v in label_map.items()}
 
 
 def load_split(dataset_dir, label_map, allow_unknown=False, verbose=True):
-    """
-    Load every valid image, find the face with the SAME detector, keep the RAW
-    gray crop (normalization happens later, once, in normalize_face).
-    Folders not in label_map: skipped, or label -1 ("Unknown") if allow_unknown.
-    Returns (records, report).
-    """
+    """Load images, detect faces, and return raw gray face crops with metadata."""
     detector = get_face_detector()
     records, report = [], {}
     for folder in list_people(dataset_dir, require_images=False):
@@ -285,28 +285,34 @@ def load_split(dataset_dir, label_map, allow_unknown=False, verbose=True):
         else:
             print(f"[WARN] '{folder}' in {dataset_dir} is not in the label map - skipped.")
             continue
+
         paths = list_image_files(os.path.join(dataset_dir, folder))
         st = dict(found=len(paths), detected=0, whole=0, skipped=0, sizes=[], brightness=[])
         for p in paths:
             gray = read_gray(p)
             if gray is None:
                 st["skipped"] += 1
-                print(f"[WARN] Could not read: {p}")
                 continue
             regions = locate_faces(gray, detector, allow_precropped=True)
             crop = crop_face(gray, regions[0][0]) if regions else None
             if crop is None:
                 st["skipped"] += 1
-                print(f"[WARN] No face found, skipped: {p}")
                 continue
             mode = regions[0][1]
             st[mode] += 1
             st["sizes"].append(crop.shape[1])
             st["brightness"].append(float(crop.mean()))
-            records.append(dict(label=label, name=folder if label >= 0 else "Unknown",
-                                folder=folder, path=p, crop=crop, mode=mode,
-                                box=regions[0][0]))
+            records.append(dict(
+                label=label,
+                name=folder if label >= 0 else "Unknown",
+                folder=folder,
+                path=p,
+                crop=crop,
+                mode=mode,
+                box=regions[0][0],
+            ))
         report[folder] = st
+
     if verbose:
         print_split_report(report, os.path.basename(dataset_dir))
     return records, report
@@ -328,7 +334,7 @@ def print_split_report(report, split_name):
 
 
 def load_dataset(dataset_dir, label_map):
-    """Backward-compatible: (faces, labels) with the unified pipeline, no augmentation."""
+    """Backward-compatible: (faces, labels) without augmentation."""
     records, _ = load_split(dataset_dir, label_map, verbose=False)
     return [normalize_face(r["crop"]) for r in records], [r["label"] for r in records]
 
@@ -338,25 +344,23 @@ def augment_crop(crop, rng):
     M = cv2.getRotationMatrix2D((w / 2, h / 2), rng.uniform(-7, 7), rng.uniform(0.93, 1.07))
     M[0, 2] += rng.uniform(-0.04, 0.04) * w
     M[1, 2] += rng.uniform(-0.04, 0.04) * h
-    img = cv2.warpAffine(crop, M, (w, h), flags=cv2.INTER_LINEAR,
-                         borderMode=cv2.BORDER_REFLECT).astype(np.float32) / 255.0
-    img = np.power(img, rng.uniform(0.6, 1.6))                      # gamma
+    img = cv2.warpAffine(
+        crop, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT
+    ).astype(np.float32) / 255.0
+    img = np.power(img, rng.uniform(0.6, 1.6))
     ramp = np.linspace(1 - rng.uniform(0, 0.35), 1 + rng.uniform(0, 0.35), w, dtype=np.float32)
     if rng.random() < 0.5:
         ramp = ramp[::-1]
-    img = img * ramp[None, :] * rng.uniform(0.7, 1.2)               # side light + contrast
+    img = img * ramp[None, :] * rng.uniform(0.7, 1.2)
     sigma = rng.uniform(0, 1.5)
     if sigma > 0.4:
-        img = cv2.GaussianBlur(img, (0, 0), sigma)                  # soft focus / screen blur
+        img = cv2.GaussianBlur(img, (0, 0), sigma)
     img = img + rng.normal(0, rng.uniform(0, 0.03), img.shape).astype(np.float32)
     return (np.clip(img, 0, 1) * 255).astype(np.uint8)
 
 
 def build_training_arrays(records, copies=DEFAULT_AUGMENT_COPIES, seed=AUGMENT_SEED):
-    """
-    Originals are ALWAYS included. With copies>0 every class is topped up with
-    augmented samples to (largest_class * (1 + copies)) -> balanced classes.
-    """
+    """Balance classes using originals + augmented samples up to largest_class * (1 + copies)."""
     by_label = {}
     for r in records:
         by_label.setdefault(r["label"], []).append(r["crop"])
@@ -374,9 +378,32 @@ def build_training_arrays(records, copies=DEFAULT_AUGMENT_COPIES, seed=AUGMENT_S
     return faces, np.array(labels, dtype=np.int32)
 
 
+def _knn_vote_distance(distances, labels, k=5):
+    """
+    Top-k nearest neighbors voting with consensus penalty.
+    Prevents a single outlier image from misclassifying a face.
+    """
+    k = min(k, len(distances))
+    top_idx = np.argpartition(distances, k - 1)[:k]
+    top_labels = labels[top_idx]
+    top_dists = distances[top_idx]
 
+    unique_lbls, counts = np.unique(top_labels, return_counts=True)
+    best_lbl = int(unique_lbls[np.argmax(counts)])
+    best_dist = float(np.mean(top_dists[top_labels == best_lbl]))
+
+    # Penalize distance if neighbors disagree (< 60% consensus)
+    if np.max(counts) < (k * 0.6):
+        best_dist *= 1.35
+
+    return best_lbl, best_dist
+
+
+# ============================================================
+# RECOGNIZER CLASSES (EIGENFACES & FISHERFACES)
+# ============================================================
 class EigenPCARecognizer:
-    """Memory-efficient Eigenfaces recognizer using Incremental PCA."""
+    """Memory-efficient Eigenfaces recognizer using Incremental PCA + k-NN voting."""
 
     def __init__(self, n_components=EIGEN_COMPONENTS):
         self.n_components = n_components
@@ -390,29 +417,19 @@ class EigenPCARecognizer:
             raise ValueError("Eigenfaces needs at least 2 training images.")
 
         self.n_components = min(self.n_components, n - 1)
-        self.pca = IncrementalPCA(
-            n_components=self.n_components,
-            batch_size=256
-        )
+        self.pca = IncrementalPCA(n_components=self.n_components, batch_size=256)
 
         batch_size = max(256, self.n_components)
         starts = list(range(0, n, batch_size))
-
-        # Ensure the final batch has enough samples for IncrementalPCA.
         if len(starts) > 1 and n - starts[-1] < self.n_components:
             starts.pop()
 
         print(f"Eigenfaces PCA: {n} images, {self.n_components} components")
         for i, start in enumerate(starts):
             end = starts[i + 1] if i + 1 < len(starts) else n
-            batch = np.stack([
-                np.asarray(faces[j], dtype=np.float32).reshape(-1)
-                for j in range(start, end)
-            ])
+            batch = np.stack([np.asarray(faces[j], dtype=np.float32).reshape(-1) for j in range(start, end)])
             self.pca.partial_fit(batch)
             print(f"PCA progress: {end}/{n} images", flush=True)
-
-        print("PCA completed. Projecting training images...", flush=True)
 
         projected = []
         for start in range(0, n, 256):
@@ -421,34 +438,28 @@ class EigenPCARecognizer:
                 for j in range(start, min(start + 256, n))
             ])
             projected.append(self.pca.transform(batch).astype(np.float32))
-            done = min(start + 256, n)
-            if done % 1024 < 256 or done == n:
-                print(f"Projection progress: {done}/{n}", flush=True)
 
         self.features = np.concatenate(projected, axis=0)
         self.labels = np.asarray(labels, dtype=np.int32)
 
-    def predict(self, face):
+    def predict(self, face, k=5):
         if self.pca is None or self.features is None:
             raise RuntimeError("Eigenfaces model is not trained or loaded.")
-
         x = np.asarray(face, dtype=np.float32).reshape(1, -1)
         projected = self.pca.transform(x).astype(np.float32)[0]
         distances = np.linalg.norm(self.features - projected, axis=1)
-        index = int(np.argmin(distances))
-        return int(self.labels[index]), float(distances[index])
+        return _knn_vote_distance(distances, self.labels, k=k)
 
     def write(self, path):
         if self.pca is None:
             raise RuntimeError("Cannot save an untrained Eigenfaces model.")
-
         np.savez_compressed(
             path,
             mean=self.pca.mean_,
             components=self.pca.components_,
             features=self.features,
             labels=self.labels,
-            n_components=np.array([self.n_components], dtype=np.int32)
+            n_components=np.array([self.n_components], dtype=np.int32),
         )
 
     def read(self, path):
@@ -464,9 +475,8 @@ class EigenPCARecognizer:
             self.labels = data["labels"].copy()
 
 
-
 class FisherPCARecognizer:
-    """Memory-efficient PCA-LDA (approximate Fisherfaces) recognizer."""
+    """Memory-efficient PCA-LDA (approximate Fisherfaces) recognizer + k-NN voting."""
 
     def __init__(self):
         self.pca = None
@@ -477,105 +487,49 @@ class FisherPCARecognizer:
 
     def train(self, faces, labels):
         eigen_path = model_path("eigen")
-
         if not os.path.exists(eigen_path):
-            raise FileNotFoundError(
-                "Train the Eigenfaces model first: " + eigen_path
-            )
+            raise FileNotFoundError("Train the Eigenfaces model first: " + eigen_path)
 
-        # Reuse the already trained Eigenfaces PCA.
         eigen = EigenPCARecognizer()
         eigen.read(eigen_path)
         self.pca = eigen.pca
 
         labels = np.asarray(labels, dtype=np.int32)
-
         if len(faces) != len(labels):
             raise ValueError("Faces and labels count mismatch.")
-
         if len(np.unique(labels)) < 2:
             raise ValueError("Fisherfaces needs at least 2 classes.")
 
-        print(
-            f"PCA-LDA: projecting {len(faces)} images "
-            "using existing Eigenfaces PCA...",
-            flush=True
-        )
-
         projected_batches = []
-
         for start in range(0, len(faces), 256):
             batch = np.stack([
                 np.asarray(faces[j], dtype=np.float32).reshape(-1)
                 for j in range(start, min(start + 256, len(faces)))
             ])
-
-            projected_batches.append(
-                self.pca.transform(batch).astype(np.float32)
-            )
-
-            done = min(start + 256, len(faces))
-            print(f"Projection: {done}/{len(faces)}", flush=True)
+            projected_batches.append(self.pca.transform(batch).astype(np.float32))
 
         X = np.concatenate(projected_batches, axis=0)
-
-        print("Training LDA with automatic shrinkage...", flush=True)
-
-        lda = LinearDiscriminantAnalysis(
-            solver="eigen",
-            shrinkage="auto"
-        )
+        lda = LinearDiscriminantAnalysis(solver="eigen", shrinkage="auto")
         lda.fit(X, labels)
 
-        n_components = min(
-            lda.scalings_.shape[1],
-            len(lda.classes_) - 1
-        )
-
-        self.lda_center = np.asarray(
-         X.mean(axis=0), dtype=np.float32
-        )
-
-        self.lda_scalings = np.asarray(
-            lda.scalings_[:, :n_components],
-            dtype=np.float32
-        )
-
-        self.features = (
-            (X - self.lda_center) @ self.lda_scalings
-        ).astype(np.float32)
-
+        n_components = min(lda.scalings_.shape[1], len(lda.classes_) - 1)
+        self.lda_center = np.asarray(X.mean(axis=0), dtype=np.float32)
+        self.lda_scalings = np.asarray(lda.scalings_[:, :n_components], dtype=np.float32)
+        self.features = ((X - self.lda_center) @ self.lda_scalings).astype(np.float32)
         self.labels = labels
 
-        print(
-            f"LDA completed: {n_components} components, "
-            f"{len(self.labels)} training samples.",
-            flush=True
-        )
-
-    def predict(self, face):
+    def predict(self, face, k=5):
         if self.pca is None or self.features is None:
             raise RuntimeError("PCA-LDA model is not trained or loaded.")
-
         x = np.asarray(face, dtype=np.float32).reshape(1, -1)
         pca_feature = self.pca.transform(x).astype(np.float32)
-
-        lda_feature = (
-            (pca_feature - self.lda_center) @ self.lda_scalings
-        )[0]
-
-        distances = np.linalg.norm(
-            self.features - lda_feature, axis=1
-        )
-
-        index = int(np.argmin(distances))
-
-        return int(self.labels[index]), float(distances[index])
+        lda_feature = ((pca_feature - self.lda_center) @ self.lda_scalings)[0]
+        distances = np.linalg.norm(self.features - lda_feature, axis=1)
+        return _knn_vote_distance(distances, self.labels, k=k)
 
     def write(self, path):
         if self.features is None:
             raise RuntimeError("Cannot save an untrained PCA-LDA model.")
-
         np.savez_compressed(
             path,
             pca_mean=self.pca.mean_,
@@ -583,45 +537,37 @@ class FisherPCARecognizer:
             lda_center=self.lda_center,
             lda_scalings=self.lda_scalings,
             features=self.features,
-            labels=self.labels
+            labels=self.labels,
         )
 
     def read(self, path):
         with np.load(path, allow_pickle=False) as data:
             mean = data["pca_mean"].copy()
             components = data["pca_components"].copy()
-
-            self.pca = IncrementalPCA(
-                n_components=components.shape[0]
-            )
+            self.pca = IncrementalPCA(n_components=components.shape[0])
             self.pca.mean_ = mean
             self.pca.components_ = components
             self.pca.n_components_ = components.shape[0]
             self.pca.n_features_in_ = mean.shape[0]
             self.pca.n_samples_seen_ = 1
-
             self.lda_center = data["lda_center"].copy()
             self.lda_scalings = data["lda_scalings"].copy()
             self.features = data["features"].copy()
             self.labels = data["labels"].copy()
 
 
-
+# ============================================================
+# TRAINING, LOADING & RECOGNITION PIPELINE
+# ============================================================
 def create_recognizer(method, n_samples=None):
     if method == "eigen":
-        comps = EIGEN_COMPONENTS if n_samples is None else max(
-            1, min(EIGEN_COMPONENTS, n_samples - 1)
-        )
+        comps = EIGEN_COMPONENTS if n_samples is None else max(1, min(EIGEN_COMPONENTS, n_samples - 1))
         return EigenPCARecognizer(n_components=comps)
-
     if method == "fisher":
         return FisherPCARecognizer()
-
     require_face_module()
-
     if method == "lbph":
         return cv2.face.LBPHFaceRecognizer_create(**LBPH_PARAMS)
-
     raise ValueError(f"Unknown method: {method}")
 
 
@@ -637,7 +583,6 @@ def train_method(method, augment=DEFAULT_AUGMENT_COPIES):
     require_face_module()
     label_map = build_label_map()
     print(f"\n=== Training {METHOD_LABELS[method]} ===")
-    print("Label map:", label_map)
     records, _ = load_split(DATASET_TRAIN_DIR, label_map, verbose=True)
     if not records:
         raise RuntimeError("No usable training images.")
@@ -655,10 +600,17 @@ def train_method(method, augment=DEFAULT_AUGMENT_COPIES):
     path = model_path(method)
     rec.write(path)
     _write_json(meta_path(method), dict(
-        method=method, pipeline_version=PIPELINE_VERSION, face_size=list(FACE_SIZE),
-        label_map=label_map, original_images=len(records), training_samples=len(faces),
-        augment_copies=augment, trained_at=datetime.now().isoformat(timespec="seconds")))
-    clear_threshold(method)     # an old threshold belonged to the old model
+        method=method,
+        pipeline_version=PIPELINE_VERSION,
+        face_size=list(FACE_SIZE),
+        lbph_params=LBPH_PARAMS if method == "lbph" else None,
+        label_map=label_map,
+        original_images=len(records),
+        training_samples=len(faces),
+        augment_copies=augment,
+        trained_at=datetime.now().isoformat(timespec="seconds"),
+    ))
+    clear_threshold(method)
     print(f"Saved model: {path}  ({os.path.getsize(path) / 1e6:.1f} MB)")
     return dict(method=method, path=path, samples=len(faces), originals=len(records))
 
@@ -673,8 +625,7 @@ def load_recognizer(method):
     if not meta or meta.get("pipeline_version") != PIPELINE_VERSION:
         raise RuntimeError(f"{path} was not trained with the current pipeline. Retrain {METHOD_LABELS[method]}.")
     if meta.get("label_map") != load_label_map():
-        raise RuntimeError(f"{path} was trained with a different label map than models/label_map.json. "
-                           f"Retrain (main.py option 5 retrains all three).")
+        raise RuntimeError(f"{path} was trained with a different label map than models/label_map.json. Retrain.")
     rec = create_recognizer(method)
     rec.read(path)
     return rec, os.path.abspath(path), meta
@@ -686,49 +637,29 @@ def describe_model(path, meta):
             f"{meta.get('original_images')} images -> {meta.get('training_samples')} samples")
 
 
-# ============================================================
-# PREDICTION + UNKNOWN LOGIC (identical everywhere)
-# ============================================================
 def recognize_face(recognizer, face, id_to_name, threshold):
     label_id, distance = recognizer.predict(face)
     label_id, distance = int(label_id), float(distance)
     closest = id_to_name.get(label_id, "?")
     known = (label_id in id_to_name) and bool(np.isfinite(distance)) and distance <= threshold
-    return dict(label_id=label_id, closest=closest, name=closest if known else "Unknown",
-                distance=distance, known=bool(known), threshold=float(threshold))
+    return dict(
+        label_id=label_id,
+        closest=closest,
+        name=closest if known else "Unknown",
+        distance=distance,
+        known=bool(known),
+        threshold=float(threshold),
+    )
 
 
-def analyze_image(img, recognizer, id_to_name, threshold, detector=None, allow_precropped=False):
+def recognize_image(img, recognizer, id_to_name, threshold, allow_precropped=False, detector=None):
     """
-    THE recognition pipeline. Webcam frames, Streamlit uploads and check_photo.py
-    all call this one function:
+    Unified recognition pipeline used by CLI, Streamlit upload, and Webcam:
         BGR/gray image -> gray -> Haar faces (largest first) -> crop -> 200x200
-        -> equalizeHist (once) -> recognizer.predict -> threshold -> name.
-    Returns a list of dicts: box, mode, face_img + recognize_face() fields.
+        -> equalizeHist -> recognizer.predict -> threshold -> name.
     """
     gray = to_gray(img)
     detector = detector or get_face_detector()
-    out = []
-    for box, mode in locate_faces(gray, detector, allow_precropped):
-        face = preprocess_face(gray, box)
-        if face is None:
-            continue
-        out.append(dict(box=box, mode=mode, face_img=face,
-                        **recognize_face(recognizer, face, id_to_name, threshold)))
-    return out
-
-
-def recognize_image(gray, recognizer, id_to_name, threshold, allow_precropped=False, detector=None):
-    """
-    THE recognition pipeline. Webcam (recognize_realtime.py), Streamlit (app.py) and
-    check_photo.py ALL call this one function, so they cannot drift apart:
-
-        gray image -> Haar face detection (largest first) -> crop -> 200x200
-        -> histogram equalization (once) -> recognizer.predict -> threshold -> name
-
-    Returns one dict per detected face: label_id, closest, name, distance, known,
-    threshold, box, mode, face_img (the exact 200x200 array the model saw).
-    """
     results = []
     for box, mode in locate_faces(gray, detector, allow_precropped=allow_precropped):
         face = preprocess_face(gray, box)
@@ -739,6 +670,14 @@ def recognize_image(gray, recognizer, id_to_name, threshold, allow_precropped=Fa
         results.append(res)
     return results
 
+
+# Backward-compatible alias
+analyze_image = recognize_image
+
+
+# ============================================================
+# THRESHOLD STORE MANAGEMENT
+# ============================================================
 def _threshold_store():
     return _read_json(THRESHOLDS_PATH) or {}
 

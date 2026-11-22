@@ -15,9 +15,12 @@ try:
 except Exception:
     WEBRTC_AVAILABLE = False
 
-st.set_page_config(page_title="Real-Time Face Recognition System", page_icon="📷",
-                   layout="wide", initial_sidebar_state="expanded")
-
+st.set_page_config(
+    page_title="Real-Time Face Recognition System",
+    page_icon="📷",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 UTILS_PATH = os.path.join(BASE_DIR, "src", "utils.py")
@@ -46,11 +49,7 @@ REQUIRED_UTILS = [
 ]
 _missing = [n for n in REQUIRED_UTILS if not hasattr(utils, n)]
 if _missing:
-    st.error("The `src/utils.py` on disk is an OLD version and is missing: "
-             + ", ".join(_missing))
-    st.code(f"File in use: {UTILS_PATH}\nLast modified: "
-            f"{time.ctime(os.path.getmtime(UTILS_PATH))}\n\n"
-            "Replace it with the new utils.py, save, then reload this page.")
+    st.error("The `src/utils.py` on disk is an OLD version and is missing: " + ", ".join(_missing))
     st.stop()
 
 if not hasattr(cv2, "face"):
@@ -98,7 +97,8 @@ section = st.sidebar.radio("Select Module:", [
     "1B. Webcam / Real-Time Recognition",
     "2. Method Comparison",
     "3. Evaluation & Results",
-    "4. About Project"])
+    "4. About Project",
+])
 st.sidebar.markdown("---")
 st.sidebar.markdown("**Project Details**")
 st.sidebar.caption("Area: Computer Vision")
@@ -107,6 +107,9 @@ st.sidebar.caption("Detector: Haar Cascade")
 st.sidebar.caption("Classifiers: LBPH, Eigenfaces, Fisherfaces")
 
 
+# ============================================================
+# 1. STATIC IMAGE DEMO
+# ============================================================
 if section == "1. Face Recognition Demo":
     st.header("1. Face Recognition Demo")
     st.write("Upload a face image. Detection, preprocessing, model loading, label mapping and "
@@ -119,14 +122,16 @@ if section == "1. Face Recognition Demo":
         method_label = st.selectbox("Select Recognition Algorithm:", list(utils.LABEL_TO_KEY))
         method = utils.LABEL_TO_KEY[method_label]
         compare_all = st.checkbox("Also compare all three methods on this image")
-        precropped = st.checkbox("Accept tightly-cropped face images when Haar finds no face "
-                                 "(same rule as dataset loading)", value=True)
+        precropped = st.checkbox(
+            "Accept tightly-cropped face images when Haar finds no face",
+            value=True,
+        )
         central_thr = utils.get_threshold(method)
         st.info(f"Unknown threshold for {method_label}: {central_thr:.2f} "
                 f"({utils.threshold_source(method)})")
-        with st.expander("Advanced: override threshold"):
-            use_override = st.checkbox("Use custom threshold")
-            override_val = st.number_input("Threshold", value=float(central_thr), step=1.0)
+        with st.expander("Advanced: override threshold", expanded=True):
+            use_override = st.checkbox("Use custom threshold", value=False)
+            override_val = st.number_input("Threshold", value=float(central_thr), step=5.0)
         uploaded = st.file_uploader("Upload Image (JPG / PNG):", type=["jpg", "jpeg", "png"])
         run_button = st.button("Recognize Face", type="primary", use_container_width=True)
 
@@ -145,7 +150,7 @@ if section == "1. Face Recognition Demo":
             else:
                 t0 = time.time()
                 frame = utils.limit_size(img)
-                gray = utils.to_gray(img)
+                gray = utils.to_gray(frame)
                 try:
                     id_to_name = get_id_to_name()
                     methods = list(utils.METHODS) if compare_all else [method]
@@ -155,9 +160,11 @@ if section == "1. Face Recognition Demo":
                     for m in methods:
                         rec, mpath, _ = models[m]
                         thr = utils.get_threshold(
-                            m, override_val if (use_override and m == method) else None)
-                        found = utils.recognize_image(gray, rec, id_to_name, thr,
-                                                      allow_precropped=precropped)
+                            m, override_val if (use_override and m == method) else None
+                        )
+                        found = utils.recognize_image(
+                            gray, rec, id_to_name, thr, allow_precropped=precropped
+                        )
                         for i, r in enumerate(found, 1):
                             rows.append(dict(face=i, key=m, model_path=mpath, **r))
                 except Exception as e:
@@ -188,8 +195,8 @@ if section == "1. Face Recognition Demo":
                         c2.metric("Distance", f"{r['distance']:.2f}")
                         c3.metric("Recognition Status", "Recognized" if r["known"] else "Unknown")
                         c4.metric("Recognition Method", method_label)
-                        st.caption(f"Closest class: {r['closest']} (ID {r['label_id']}) | "
-                                   f"threshold {r['threshold']:.2f}")
+                        st.caption(f"Closest class in model: **{r['closest']}** (ID {r['label_id']}) | "
+                                   f"Threshold: {r['threshold']:.2f}")
 
                     if compare_all:
                         st.subheader("All Methods")
@@ -205,179 +212,101 @@ if section == "1. Face Recognition Demo":
                     m2.metric("Recognized", sum(r["known"] for r in rows if r["key"] == method))
                     m3.metric("Execution Time", f"{elapsed:.1f} ms")
 
-                    with st.expander("Debug: what the model actually sees"):
-                        for i, face in faces:
-                            st.image(face, caption=f"Face {i}: processed {face.shape[1]}x{face.shape[0]}",
-                                     width=200)
-                        for m, (_, mpath, _) in models.items():
-                            st.caption(f"{utils.METHOD_LABELS[m]} model: {mpath}")
-                        st.caption(f"Label map: {utils.load_label_map()}")
 
-
-
+# ============================================================
+# 1B. WEBCAM / REAL-TIME RECOGNITION
+# ============================================================
 elif section == "1B. Webcam / Real-Time Recognition":
-
     st.header("1B. Webcam / Real-Time Recognition")
-
-    st.write(
-        "Use your browser webcam for real-time face recognition. "
-        "The webcam uses the same trained models, label mapping, "
-        "preprocessing and threshold logic as the uploaded-image system."
-    )
+    st.write("Use your browser webcam for real-time face recognition.")
 
     if not WEBRTC_AVAILABLE:
         st.error("Browser webcam support is not available.")
         st.code("python -m pip install streamlit-webrtc av")
         st.stop()
 
-    webcam_method_label = st.selectbox(
-        "Select Recognition Algorithm:",
-        list(utils.LABEL_TO_KEY),
-        index=0,
-        key="webcam_method_label",
-    )
+    c_alg, c_thr = st.columns(2)
+    with c_alg:
+        webcam_method_label = st.selectbox(
+            "Select Recognition Algorithm:",
+            list(utils.LABEL_TO_KEY),
+            index=0,
+            key="webcam_method_label",
+        )
+        webcam_method = utils.LABEL_TO_KEY[webcam_method_label]
+        webcam_precropped = st.checkbox(
+            "Accept tightly-cropped faces when Haar finds no face",
+            value=False,
+            key="webcam_precropped",
+        )
 
-    webcam_method = utils.LABEL_TO_KEY[webcam_method_label]
-
-    webcam_precropped = st.checkbox(
-        "Accept tightly-cropped faces when Haar finds no face",
-        value=False,
-        key="webcam_precropped",
-    )
-
-    webcam_threshold = utils.get_threshold(webcam_method)
-
-    st.info(
-        f"Unknown threshold for {webcam_method_label}: "
-        f"{webcam_threshold:.2f} "
-        f"({utils.threshold_source(webcam_method)})"
-    )
-
-    st.caption(
-        "Click START, allow camera permission, keep your face clearly visible, "
-        "and click STOP when finished."
-    )
+    with c_thr:
+        default_thr = float(utils.get_threshold(webcam_method))
+        max_slider = 200.0 if webcam_method == "lbph" else (10000.0 if webcam_method == "eigen" else 2000.0)
+        step_slider = 2.0 if webcam_method == "lbph" else (100.0 if webcam_method == "eigen" else 20.0)
+        webcam_threshold = st.slider(
+            f"Live Unknown Threshold ({webcam_method_label}):",
+            min_value=10.0,
+            max_value=max_slider,
+            value=min(default_thr, max_slider),
+            step=step_slider,
+            help="Lower = stricter (more Unknowns). Higher = looser. Watch the distance number on screen to tune this.",
+        )
 
     try:
         webcam_id_to_name = get_id_to_name()
-        webcam_recognizer, webcam_model_path, _ = get_model(webcam_method)
-
+        webcam_recognizer, _, _ = get_model(webcam_method)
     except Exception as exc:
         st.error("Could not load the selected recognition model.")
         st.exception(exc)
         st.stop()
 
     class FaceRecognitionVideoProcessor(VideoProcessorBase):
-
         def __init__(self):
-
             self.method = webcam_method
             self.threshold = float(webcam_threshold)
             self.precropped = webcam_precropped
-
             self.recognizer = webcam_recognizer
             self.id_to_name = webcam_id_to_name
-
             self.frame_count = 0
-
-            self.last_name = "Unknown"
-            self.last_known = False
-            self.last_distance = None
-
             self.prediction_history = []
-
             self.history_size = 7
 
         def _stable_prediction(self, result):
-
             if result is None:
-                self.prediction_history.append(
-                    ("Unknown", False, None)
-                )
+                self.prediction_history.append(("Unknown", False, None))
             else:
                 name = result.get("name", "Unknown")
                 known = bool(result.get("known", False))
                 distance = float(result.get("distance", 0.0))
-
-                if known:
-                    self.prediction_history.append(
-                        (name, True, distance)
-                    )
-                else:
-                    self.prediction_history.append(
-                        ("Unknown", False, distance)
-                    )
+                self.prediction_history.append((name if known else "Unknown", known, distance))
 
             if len(self.prediction_history) > self.history_size:
                 self.prediction_history.pop(0)
 
-            if not self.prediction_history:
-                return "Unknown", False, None
-
-            known_predictions = [
-                p for p in self.prediction_history
-                if p[1] is True
-            ]
-
+            known_predictions = [p for p in self.prediction_history if p[1]]
             if known_predictions:
-
                 name_counts = {}
-
-                for name, known, distance in known_predictions:
+                for name, _, _ in known_predictions:
                     name_counts[name] = name_counts.get(name, 0) + 1
 
-                best_name = max(
-                    name_counts,
-                    key=name_counts.get
-                )
+                best_name = max(name_counts, key=name_counts.get)
+                if name_counts[best_name] >= 3:
+                    distances = [p[2] for p in known_predictions if p[0] == best_name and p[2] is not None]
+                    avg_dist = sum(distances) / len(distances) if distances else None
+                    return best_name, True, avg_dist
 
-                best_count = name_counts[best_name]
-
-                if best_count >= 2:
-
-                    distances = [
-                        p[2]
-                        for p in known_predictions
-                        if p[0] == best_name and p[2] is not None
-                    ]
-
-                    avg_distance = (
-                        sum(distances) / len(distances)
-                        if distances
-                        else None
-                    )
-
-                    return best_name, True, avg_distance
-
-            unknown_distances = [
-                p[2]
-                for p in self.prediction_history
-                if p[2] is not None
-            ]
-
-            avg_distance = (
-                sum(unknown_distances) / len(unknown_distances)
-                if unknown_distances
-                else None
-            )
-
-            return "Unknown", False, avg_distance
+            all_dists = [p[2] for p in self.prediction_history if p[2] is not None]
+            avg_dist = sum(all_dists) / len(all_dists) if all_dists else None
+            return "Unknown", False, avg_dist
 
         def recv(self, frame):
-
-            image = frame.to_ndarray(format="bgr24")
-
+            raw_image = frame.to_ndarray(format="bgr24")
             self.frame_count += 1
 
             try:
-
-                image = cv2.flip(image, 1)
-
-                original = image.copy()
-
-                image_for_recognition = utils.limit_size(image)
-
-                gray = utils.to_gray(image_for_recognition)
+                image = utils.limit_size(cv2.flip(raw_image, 1))
+                gray = utils.to_gray(image)
 
                 found = utils.recognize_image(
                     gray,
@@ -388,197 +317,78 @@ elif section == "1B. Webcam / Real-Time Recognition":
                 )
 
                 if not found:
-
                     self._stable_prediction(None)
-
                     cv2.putText(
-                        image,
-                        "No face detected",
-                        (20, 40),
-                        cv2.FONT_HERSHEY_SIMPLEX,
-                        0.8,
-                        (255, 255, 255),
-                        2,
-                        cv2.LINE_AA,
+                        image, "No face detected", (20, 40),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 255), 2, cv2.LINE_AA
                     )
-
                 else:
-
-                    for result in found:
-
+                    for idx, result in enumerate(found):
                         x, y, w, h = result["box"]
+                        distance = float(result.get("distance", 0.0))
+                        closest = result.get("closest", "?")
 
-                        known = bool(result["known"])
-
-                        raw_name = result.get(
-                            "name",
-                            "Unknown"
-                        )
-
-                        distance = float(
-                            result.get(
-                                "distance",
-                                0.0
-                            )
-                        )
-
-                        if known:
-                            stable_name, stable_known, stable_distance = (
-                                self._stable_prediction(result)
-                            )
+                        if idx == 0:
+                            stable_name, stable_known, stable_dist = self._stable_prediction(result)
+                            disp_dist = stable_dist if stable_dist is not None else distance
                         else:
-                            stable_name, stable_known, stable_distance = (
-                                self._stable_prediction(result)
-                            )
+                            stable_known = bool(result["known"])
+                            stable_name = result["name"] if stable_known else "Unknown"
+                            disp_dist = distance
 
                         if stable_known:
-                            display_name = stable_name
                             color = (0, 255, 0)
-
-                            display_distance = (
-                                stable_distance
-                                if stable_distance is not None
-                                else distance
-                            )
-
-                            label = (
-                                f"{display_name} "
-                                f"({display_distance:.1f})"
-                            )
-
+                            label = f"{stable_name} ({disp_dist:.1f})"
                         else:
-                            display_name = "Unknown"
                             color = (0, 0, 255)
+                            label = f"Unknown [near: {closest}] ({disp_dist:.1f})"
 
-                            label = (
-                                f"Unknown ({distance:.1f})"
-                            )
-
-                        cv2.rectangle(
-                            image,
-                            (x, y),
-                            (x + w, y + h),
-                            color,
-                            2,
-                        )
-
+                        cv2.rectangle(image, (x, y), (x + w, y + h), color, 2)
                         cv2.putText(
-                            image,
-                            label,
-                            (
-                                x,
-                                max(y - 10, 25)
-                            ),
-                            cv2.FONT_HERSHEY_SIMPLEX,
-                            0.7,
-                            color,
-                            2,
-                            cv2.LINE_AA,
+                            image, label, (x, max(y - 10, 25)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.65, color, 2, cv2.LINE_AA
                         )
 
-                method_text = (
-                    f"Method: {utils.METHOD_LABELS[self.method]}"
-                )
-
-                threshold_text = (
-                    f"Threshold: {self.threshold:.1f}"
-                )
-
                 cv2.putText(
-                    image,
-                    method_text,
-                    (20, image.shape[0] - 45),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (255, 255, 255),
-                    2,
-                    cv2.LINE_AA,
-                )
-
-                cv2.putText(
-                    image,
-                    threshold_text,
-                    (20, image.shape[0] - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (255, 255, 255),
-                    2,
-                    cv2.LINE_AA,
+                    image, f"Method: {utils.METHOD_LABELS[self.method]} | Thr: {self.threshold:.1f}",
+                    (20, image.shape[0] - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2, cv2.LINE_AA
                 )
 
             except Exception as exc:
-
+                image = raw_image
                 cv2.putText(
-                    image,
-                    "Recognition error",
-                    (20, 40),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.8,
-                    (0, 0, 255),
-                    2,
-                    cv2.LINE_AA,
+                    image, "Recognition error", (20, 40),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 2, cv2.LINE_AA
                 )
-
                 if self.frame_count == 1:
-                    print(
-                        "Webcam recognition error:",
-                        repr(exc)
-                    )
+                    print("Webcam recognition error:", repr(exc))
 
-            return av.VideoFrame.from_ndarray(
-                image,
-                format="bgr24"
-            )
+            return av.VideoFrame.from_ndarray(image, format="bgr24")
 
     rtc_configuration = RTCConfiguration(
-        {
-            "iceServers": [
-                {
-                    "urls": [
-                        "stun:stun.l.google.com:19302"
-                    ]
-                }
-            ]
-        }
+        {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
     )
 
-    webrtc_streamer(
-        key="face-recognition-webcam-v2",
+    ctx = webrtc_streamer(
+        key=f"face-recognition-webcam-{webcam_method}",
         mode=WebRtcMode.SENDRECV,
         rtc_configuration=rtc_configuration,
         video_processor_factory=FaceRecognitionVideoProcessor,
         media_stream_constraints={
-            "video": {
-                "width": {"ideal": 640},
-                "height": {"ideal": 480},
-                "frameRate": {"ideal": 15},
-            },
+            "video": {"width": {"ideal": 640}, "height": {"ideal": 480}, "frameRate": {"ideal": 15}},
             "audio": False,
         },
         async_processing=True,
     )
 
-    st.markdown("---")
-
-    st.subheader("How to use Webcam Recognition")
-
-    st.markdown(
-        """
-        1. Click **START** and allow browser camera permission.
-        2. Keep your face clearly visible and reasonably close to the camera.
-        3. Make sure the room has sufficient lighting.
-        4. **Known face** → green box + trained person's name.
-        5. **Unknown face** → red box + `Unknown`.
-        6. The system uses recent-frame voting to reduce random recognition changes.
-        7. Click **STOP** to end the webcam stream.
-
-        **Privacy:** The webcam is processed through the Streamlit application;
-        the application does not intentionally save webcam frames or recordings.
-        """
-    )
+    if ctx.video_processor:
+        ctx.video_processor.threshold = float(webcam_threshold)
+        ctx.video_processor.precropped = webcam_precropped
 
 
-
+# ============================================================
+# 2, 3, 4. COMPARISON, EVALUATION & ABOUT
+# ============================================================
 elif section == "2. Method Comparison":
     st.header("2. Method Performance Comparison")
     st.write("Quantitative comparison across LBPH, Eigenfaces, and Fisherfaces.")
@@ -628,7 +438,6 @@ elif section == "3. Evaluation & Results":
         if os.path.exists(p):
             st.image(p, caption=os.path.basename(p), use_container_width=True)
 
-
 elif section == "4. About Project":
     st.header("4. Project Documentation & Methodology")
     st.subheader("Pipeline Architecture")
@@ -639,8 +448,8 @@ elif section == "4. About Project":
 3. **Classification**: LBPH, Eigenfaces (PCA) or Fisherfaces (LDA) return the closest known
    person and a distance.
 4. **Unknown detection**: the distance is compared with a per-method threshold
-   (`models/thresholds.json`, defaults LBPH 70 / Eigenfaces 4500 / Fisherfaces 400 until
-   calibrated). A prediction is not accepted just because it is the closest class.
+   (`models/thresholds.json`, defaults LBPH 85 / Eigenfaces 4000 / Fisherfaces 350 until
+   calibrated).
 5. **Names**: label IDs are converted to names through `models/label_map.json`.
 """)
     st.markdown("---")
@@ -657,11 +466,10 @@ elif section == "4. About Project":
                                 "Source": utils.threshold_source(m)} for m in utils.METHODS]),
                  use_container_width=True, hide_index=True)
 
-
 st.markdown(
     '<div class="custom-footer">'
     'Real-Time Face Recognition System | Computer Vision Assignment<br>'
     '<span>Developed by Shirsam Bhattacharjee & Roni Ghosh</span>'
     '</div>',
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
